@@ -1,0 +1,790 @@
+#!/usr/bin/perl -w
+use strict;
+
+# Copyright (c) 2007-2008, Lawrence Livermore National Security (LLNS), LLC
+# Produced at the Lawrence Livermore National Laboratory (LLNL)
+# Written by Adam Moody <moody20@llnl.gov>.
+# UCRL-CODE-232117.
+# All rights reserved.
+# 
+# This file is part of mpiGraph. For details, see
+#   http://www.sourceforge.net/projects/mpigraph
+# Please also read the Additional BSD Notice below.
+# 
+# Redistribution and use in source and binary forms, with or without modification,
+# are permitted provided that the following conditions are met:
+# â* Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the disclaimer below.
+# â* Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the disclaimer (as noted below) in the documentation
+#    and/or other materials provided with the distribution.
+# â* Neither the name of the LLNL nor the names of its contributors may be used to
+#    endorse or promote products derived from this software without specific prior
+#    written permission.
+# â* 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+# IN NO EVENT SHALL LLNL, THE U.S. DEPARTMENT
+# OF ENERGY OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+# THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# 
+# Additional BSD Notice
+# 1. This notice is required to be provided under our contract with the U.S. Department
+#    of Energy (DOE). This work was produced at LLNL under Contract No. W-7405-ENG-48
+#    with the DOE.
+# 2. Neither the United States Government nor LLNL nor any of their employees, makes
+#    any warranty, express or implied, or assumes any liability or responsibility for
+#    the accuracy, completeness, or usefulness of any information, apparatus, product,
+#    or process disclosed, or represents that its use would not infringe privately-owned
+#    rights.
+# 3. Also, reference herein to any specific commercial products, process, or services
+#    by trade name, trademark, manufacturer or otherwise does not necessarily constitute
+#    or imply its endorsement, recommendation, or favoring by the United States Government
+#    or LLNL. The views and opinions of authors expressed herein do not necessarily state
+#    or reflect those of the United States Government or LLNL and shall not be used for
+#    advertising or product endorsement purposes.
+
+# print usage and exit with error
+sub print_usage
+{
+  print "\n";
+  print "  Usage:  crunch_mpiBench [-html] [-min|-max|-avg] [-bw|-peakbw <peakMB/sec>] [-op <oplist>]\n";
+  print "                          [-data <name> <file> ... -data <name> <file> ...]\n";
+  print "                          <file> ...\n";
+  print "\n";
+  print "  Options:\n";
+  print "    -html  output results in HTML tables, instead of tab-delimitted text\n";
+  print "    -min   output measurements for minimum times\n";
+  print "    -max   output measurements for maximum times\n";
+  print "    -avg   output measurements for average times (default)\n";
+  print "    -bw    output measurements as effective bandwidth per process, instead of latency\n";
+  print "    -peakbw <peakMB/sec>\n";
+  print "           same as -bw, but outputs effective bandwidth per process as percentage of peak link bandwidth\n";
+  print "    -op <oplist>\n";
+  print "           comma-delimitted list of following operations:\n";
+  print "             Barrier,Bcast,Reduce,Allreduce,Scatter,\n";
+  print "             Gather,Gatherv,Allgather,Allgatherv,Alltoall,Alltoallv\n";
+  print "           e.g., to list just results for Barrier, Bcast, and Alltoall\n";
+  print "             -op Barrier,Bcast,Alltoall\n";
+  print "    -data <name> <file> ...\n";
+  print "           name of data set and list of associated files separated by spaces\n";
+  print "           if a second dataset is specified, speedups between the two datasets are computed,\n";
+  print "           where speedup=time(set1)/time(set2) ==> a value > 1.0 means input2 is faster\n";
+  print "\n";
+  exit 1;
+}
+
+# =============================================
+# GLOBALS
+# =============================================
+
+# hold config parameters, defaults which may be overridden by command-line args
+my %args = ();
+
+# Define the html legend limits and colors
+my @legend = (
+  0.1,  "#993399",  # purple
+  0.2,  "#996699",  # light purple
+  0.33, "#CC6666",  # dark red
+  0.50, "#FF6666",  # red
+  0.80, "#FF9999",  # light red
+  0.95, "#FFCCCC",  # faint red
+  1.05, "#FFFFFF",  # (no color)
+  1.2,  "#CCFFCC",  # faint green
+  2.0,  "#99FF99",  # light green
+  3.0,  "#66FF66",  # green
+  5.0,  "#66CC66",  # dark green
+  10.0, "#669999",  # light bluegreen
+  10.0, "#339999",  # bluegreen
+);
+
+# Define the tty legend limits and colors
+my @legend_tty = (
+  0.50, "red",
+  0.80, "magenta",
+  0.95, "yellow",
+  1.05, "",
+  1.2,  "green",
+  2.0,  "blue",
+  3.0,  "cyan",
+  3.0,  "white",
+);
+
+# =============================================
+# FUNCTIONS
+# =============================================
+
+# given a value, return the legend string for the range containing this value
+sub set_color
+{
+  my $legend = \@legend_tty;
+  $legend = \@legend;
+  my $val = shift @_;
+  my $len = scalar(@$legend);
+  for(my $i=0; $i<$len; $i += 2) {
+    if ($val < $$legend[$i]) { return $$legend[$i+1]; }
+  }
+  return $$legend[$len-1];
+}
+
+# write the legend ranges and colors in html output
+sub write_legend
+{
+  my $len = scalar(@legend);
+  print "Legend";
+  print "<table border=\"1\">";
+  print "<tr>";
+  print "<td bgcolor=\"" . $legend[1] . "\">&lt;&nbsp;" . $legend[0] . "</td>";
+  my $i = 0;
+  for($i=2; $i < $len-2; $i+=2) { 
+    print "<td bgcolor=\"" . $legend[$i+1] . "\">[" . $legend[$i-2] . ", " . $legend[$i] . ")</td>";
+  }
+  print "<td bgcolor=\"" . $legend[$i+1] . "\">&gt;=&nbsp;" . $legend[$i] . "</td>";
+  print "</tr>";
+  print "</table>\n";
+}
+
+# cell($content, $color) - build a table cell using the content and optional color
+sub cell
+{
+  my $content = shift @_;
+  my $color   = shift @_;
+
+  if ($args{mode} eq "html")
+  {
+    if ($color) { return "<td bgcolor=\"" . $color . "\">$content</td>"; }
+    else { return "<td>$content</td>"; }
+  } elsif ($args{mode} eq "tty") {
+        #black   => "^[[1;37;41m",
+    my %color = (
+        black   => "[0;30m",
+        red     => "[0;31m",
+        green   => "[0;32m",
+        yellow  => "[0;33m",
+        blue    => "[0;34m",
+        magenta => "[0;35m",
+        cyan    => "[0;36m",
+        white   => "[0;37m",
+        #black   => "[0;37;40m",
+        #red     => "[0;30;41m",
+        #green   => "[0;30;42m",
+        #yellow  => "[0;30;43m",
+        #blue    => "[0;37;44m",
+        #magenta => "[0;30;45m",
+        #cyan    => "[0;30;46m",
+        #white   => "[0;30;47m",
+        );
+    if ($color and exists $color{$color})
+    { return $color{$color} . $content . "[0m"; }
+    return $content;
+  } else {
+    return $content;
+  }
+}
+
+# row(@cells) - build a table row from an array of cells
+sub row
+{
+  if ($args{mode} eq "html")
+  {
+    return "<tr>" . join("", @_) . "</tr>";
+  } else {
+    return join("\t", @_);
+  }
+}
+
+# table(@rows) - build a table from an array of rows
+sub table
+{
+  if ($args{mode} eq "html") {
+    return "<table border=\"1\">\n" . join("\n", @_) . "\n</table>\n";
+  } else {
+    return join("\n", @_) . "\n";
+  }
+}
+
+# computes the average of a list of numbers
+sub avg
+{
+  if (@_ == 0) { return ""; }
+  my $sum = 0;
+  foreach my $i (@_) { $sum += $i; }
+  return $sum / scalar @_;
+}
+
+# Converts $_[0], which is in bytes, into proper units of
+# kilo/mega/giga/terrabytes by dividing by 1024
+sub units
+{
+  my $size = $_[0];
+  my @units = ("", "K", "M", "G", "T");
+  my $i = 0;
+  while ($size >= 1024.0) { $size /= 1024.0; $i++; }
+  return $size . $units[$i];
+}
+
+# my ($testuser, $testtime) = read_datafile("filename", \%empty_hash)
+sub read_datafile
+{
+  my $finfo = shift @_;
+  my $h = shift @_;
+
+  my ($file, $nodes, $ppn) = split(",", $finfo);
+  my $reading_nodes = 0;
+  my $procs = 0;
+  my %nodes = ();
+  open(IN, $file) || die "$file not found\n";
+  while(my $line = <IN>)
+  {
+    chomp $line;
+
+    # skip lines starting with '#' (comment)
+    if ($line =~ /^#/) { next; }
+
+    # found start of mpiBench output
+    # (may be multiple sections in one file)
+    if ($line =~ /START mpiBench/) {
+      $reading_nodes = 1;
+      $procs = 0;
+      %nodes = ();
+      next;
+    }
+
+    # in "rank : nodename" mapping section of output
+    # used to count number of nodes and ppn for operation
+    if ($reading_nodes) {
+      if ($line =~ /(\d+) : (.+)$/) {
+        $procs++;
+        $nodes{$2}++;
+      } else {
+        $reading_nodes = 0;
+        $nodes = scalar(keys %nodes);
+        $ppn = $procs / $nodes;
+      }
+    }
+
+    # yank data out of line and insert into hash
+    my ($op)   = ($line =~ /^(\w+)\s/);
+    my ($size) = ($line =~ /Bytes:\s+(\d+)/);
+    my ($its)  = ($line =~ /Iters:\s+(\d+)/);
+    my ($avg)  = ($line =~ /Avg:\s+(\d+(\.\d+)?)/);
+    my ($min)  = ($line =~ /Min:\s+(\d+(\.\d+)?)/);
+    my ($max)  = ($line =~ /Max:\s+(\d+(\.\d+)?)/);
+    if (defined $op and
+        defined $size and
+	defined $its and
+	defined $avg and
+	defined $min and
+	defined $max
+    ) {
+      my $time = $avg;
+      if    ($args{stats} eq "min") { $time = $min; }
+      elsif ($args{stats} eq "max") { $time = $max; }
+      push @{$$h{$op}{$size}{$ppn}{$nodes}}, $time;
+    }
+  }
+  close(IN);
+
+  # return username and timestamp of file
+  return (stat($file))[4,9];
+}
+
+# print table out in a nice format
+my $formatid = 0; # global to enumerate different format specifications
+sub format_table
+{
+  my @rows = @_;
+  if ($args{mode} eq "html") {
+    print join("\n", @rows);
+    return;
+  }
+
+  my @cols;
+  my $colcount = scalar(@cols);
+  my @colwidths = ();
+  # determine the maximum width of all values in each column
+  foreach my $row (@rows) {
+    @cols = split("\t", $row);
+    for (my $i=0; $i < scalar(@cols); $i++) {
+      my $colwidth = length($cols[$i]);
+      if (not defined $colwidths[$i] or $colwidth > $colwidths[$i]) { $colwidths[$i] = $colwidth; }
+    }
+  }
+  @cols = split("\t", $rows[0]);
+  my @formats = ();
+  for (my $i=0; $i < scalar(@cols); $i++) {
+    push @formats, "@" . ">"x($colwidths[$i]-1)
+  }
+
+  my $format_str = join(" ", @formats);
+
+#@>>>>>>>>> @>>>> @>>>>>>>>> @>>>>>>>>> @>>>>>>>>> @>>>>>>>>> @>>>>>>>>>
+  $formatid++;
+  eval "format ROW$formatid =
+$format_str
+\@cols
+.
+\$~ = \"ROW$formatid\";
+";
+
+  # print header rows
+  foreach my $row (@rows) {
+    @cols = split("\t", $row);
+    write;
+  }
+}
+
+# =============================================
+# MAIN LOGIC
+# =============================================
+
+# print usage and exit if no arguments are given
+if (@ARGV < 1) { print_usage(); }
+
+# set default values and read in command-line options
+$args{mode}   = "tty"; # output data in HTML tables when set to 1
+$args{bw}     = 0;     # output effective bandwidth / process instead of latency
+$args{peakbw} = "";    # peak MPI bandwidth / link
+$args{ops}    = "";    # limit output to specified operation
+$args{stats}  = "avg"; # report avg values
+$args{names}  = ();    # dataset names
+$args{data}   = ();    # tab-separated list of files for each dataset
+while ($ARGV[0] =~ /^-/)
+{
+  my $a = shift @ARGV;
+  if    ($a eq "-html")   { $args{mode}   = "html"; }
+  elsif ($a eq "-bw")     { $args{bw}     = 1; }
+  elsif ($a eq "-peakbw") { $args{peakbw} = shift @ARGV; $args{bw} = 1; }
+  elsif ($a eq "-op")     { $args{ops}    = shift @ARGV; }
+  elsif ($a eq "-min")    { $args{stats}  = "min"; }
+  elsif ($a eq "-max")    { $args{stats}  = "max"; }
+  elsif ($a eq "-data")   {
+        my $name = shift @ARGV;
+        push @{$args{names}}, $name;
+        my @files = ();
+	while (@ARGV and $ARGV[0] !~ /^-/) {
+		push @files, shift @ARGV;
+        }
+	$args{data}{$name} = join("\t", @files);
+  }
+  else { print_usage(); }
+}
+
+if (@ARGV and $ARGV[0] !~ /^-/) {
+  my $name = "DATA";
+  push @{$args{names}}, $name;
+  my @files = ();
+  while (@ARGV and $ARGV[0] !~ /^-/) { push @files, shift @ARGV; }
+  $args{data}{$name} = join("\t", @files);
+}
+
+# check that user specified somethin as input file
+if (not @{$args{names}}) { print_usage(); }
+
+# need to list at least one file
+my $date_min1 = "";
+my $date_max1 = "";
+my $date_min2 = "";
+my $date_max2 = "";
+
+# read input data
+my %d = ();
+foreach my $name (@{$args{names}}) {
+  foreach my $finfo (split "\t", $args{data}{$name}) { 
+    my ($testuser, $testtime) = read_datafile($finfo, \%{$d{$name}});
+  }
+}
+
+# compute average times (or comparisons, if have two datasets)
+my %times = ();
+my %colors = ();
+my $name1 = (@{$args{names}})[0];
+my $name2 = (@{$args{names}})[1];
+my $compare = (@{$args{names}} > 1) ? 1 : 0;
+if (not $compare) {
+  %times = %{$d{$name1}};
+} else {
+  # Calculate speedup = avg_time(input1) / avg_time(input2)
+  my $name1 = $args{names}[0];
+  my $name2 = $args{names}[1];
+  foreach my $op (sort keys %{$d{$name1}}) {
+    foreach my $size (sort {$a <=> $b} keys %{$d{$name1}{$op}}) {
+      foreach my $ppn (sort {$a <=> $b} keys %{$d{$name1}{$op}{$size}}) {
+        foreach my $nodes (sort {$a <=> $b} keys %{$d{$name1}{$op}{$size}{$ppn}}) {
+          if ($d{$name2}{$op} and
+              $d{$name2}{$op}{$size} and
+              $d{$name2}{$op}{$size}{$ppn} and
+              $d{$name2}{$op}{$size}{$ppn}{$nodes})
+          {
+            my $time1 = avg(@{$d{$name1}{$op}{$size}{$ppn}{$nodes}});
+            my $time2 = avg(@{$d{$name2}{$op}{$size}{$ppn}{$nodes}});
+            my $time = $time1/$time2;
+            $times{$op}{$size}{$ppn}{$nodes} = $time;
+	    $colors{$op}{$size}{$ppn}{$nodes} = set_color($time);
+          }
+        } # end nodes
+      } # end ppn
+    } # end size
+  } # end op
+}
+
+# list of operations to print out data for
+my @oplist = split(",", $args{ops});
+if (not @oplist) {
+  my %op_order = (
+    "Barrier"    =>  0,
+    "Reduce"     =>  1,
+    "Allreduce"  =>  2,
+    "Bcast"      =>  3,
+    "Scatter"    =>  4,
+    "Gather"     =>  5,
+    "Allgather"  =>  6,
+    "Alltoall"   =>  7,
+    "Gatherv"    =>  8,
+    "Scatterv"   =>  9,
+    "Allgatherv" => 10,
+    "Alltoallv"  => 11,
+  );
+#print join("-", keys %times), "\n";
+#print join("-", keys %op_order), "\n";
+  @oplist = (sort {$op_order{$a} <=> $op_order{$b}} keys %times);
+#  @oplist = (sort keys %times);
+}
+
+
+# Set start/end tokens for rows and cells in table
+my $br  = "\n";
+if ($args{mode} eq "html") { $br  = "<br>\n"; }
+
+# print the report title
+my $title = "Operation time (in microseconds)";
+if ($args{bw})     { $title = "Effective per-process bandwidth (in MB/sec)"; }
+if ($args{peakbw}) { $title = "Effective per-process bandwidth as a percentage of peak bandwidth ($args{peakbw} MB/sec)"; }
+if ($compare)      { $title = "Speedup = time($name1) / time($name2)"; }
+print "$title $br";
+
+# print the name and the date/time of the test (using file timestamp)
+if ($compare) { print "Collected: ($date_min1 - $date_max1) / ($date_min2 - $date_max2) $br"; }
+else          { print "$name1 $br" . "Collected: $date_min1 - $date_max1 $br"; }
+
+# pick the legend to use
+my $leg = \@legend_tty;
+if ($args{mode} eq "html") { $leg = \@legend; }
+
+# print the data for each operation
+foreach my $op (@oplist)
+{
+  my @rows = ();
+
+  # get all values of ppn and nodes used across all message sizes for this op
+  # (we'll print empty string for null cells)
+  my %ppnnodes = ();
+  foreach my $size (sort {$a <=> $b} keys %{$times{$op}}) {
+    foreach my $ppn (sort {$a <=> $b} keys %{$times{$op}{$size}}) {
+      foreach my $nodes (sort {$a <=> $b} keys %{$times{$op}{$size}{$ppn}}) {
+        $ppnnodes{$ppn}{$nodes}++;
+      }
+    }
+  }
+
+  # first row contains the op name and ppn values
+  my @cells = ();
+  push @cells, cell($op);
+  push @cells, cell("ppn");
+  foreach my $ppn (sort {$a <=> $b} keys %ppnnodes) {
+    foreach my $nodes (sort {$a <=> $b} keys %{$ppnnodes{$ppn}}) {
+      push @cells, cell($ppn);
+    }
+  }
+  push @rows, row(@cells);
+
+  # the second row contains "msgsize" and the node values
+  @cells = ();
+  push @cells, cell("msgsize");
+  push @cells, cell("nodes");
+  foreach my $ppn (sort {$a <=> $b} keys %ppnnodes) {
+    foreach my $nodes (sort {$a <=> $b} keys %{$ppnnodes{$ppn}}) {
+      push @cells, cell($nodes);
+    }
+  }
+  push @rows, row(@cells);
+
+  # sort all values in table to set legend for good coloring
+  my @all_values = ();
+  foreach my $size (sort {$a <=> $b} keys %{$times{$op}}) {
+    foreach my $ppn (sort {$a <=> $b} keys %ppnnodes) {
+      foreach my $nodes (sort {$a <=> $b} keys %{$ppnnodes{$ppn}}) {
+        if (not exists $times{$op}{$size}{$ppn}{$nodes}) { next; }
+        if ($compare) {
+        	push @all_values, $times{$op}{$size}{$ppn}{$nodes};
+	} else {
+        	push @all_values, avg(@{$times{$op}{$size}{$ppn}{$nodes}});
+	}
+      }
+    }
+  }
+  @all_values = sort {$a <=> $b} @all_values;
+  my $legend_entries = scalar(@$leg) / 2;
+  my $interval = scalar(@all_values) / $legend_entries;
+  for(my $i=1 ; $i<$legend_entries; $i++) {
+    $$leg[($i-1)*2] = $all_values[int($i*$interval)]; 
+  }
+#print join("-", @$leg), "\n";
+
+  # write out the legend for html output
+  if ($args{mode} eq "html" and $compare) { write_legend(); }
+
+  # start table
+  if ($args{mode} eq "html") { print "<table border=1>\n"; }
+
+  # then for each message size, print the size in bytes and the time/bw/comparison value
+  # for that size for the correspoding ppn/node combination
+  foreach my $size (sort {$a <=> $b} keys %{$times{$op}})
+  {
+    my $size_units = units($size);
+    @cells = ();
+    push @cells, cell($size_units), cell("");
+    foreach my $ppn (sort {$a <=> $b} keys %ppnnodes) {
+      foreach my $nodes (sort {$a <=> $b} keys %{$ppnnodes{$ppn}}) {
+        my $val = "";
+        my $color = "";
+        if (not exists $times{$op}{$size}{$ppn}{$nodes}) { push @cells, cell("-", $color); next; }
+        if ($compare) {
+          if (($args{mode} eq "tty" or $args{mode} eq "html") and exists $colors{$op}{$size}{$ppn}{$nodes}) {
+            $color = $colors{$op}{$size}{$ppn}{$nodes};
+          }
+          $val = $times{$op}{$size}{$ppn}{$nodes};
+          if ($args{mode} eq "html") { $color = set_color($val); }
+        } else {
+          my $time = avg(@{$times{$op}{$size}{$ppn}{$nodes}});
+          $val = $time;
+          if ($args{bw})
+          {
+            # convert time into effective bandwidth based on message size and collective op
+            my $c = ($size * 1000000) / (1024*1024 * $time); # bandwidth per message in MB/sec
+            if    ($op eq "Barrier")   { $val = 0; }
+            elsif ($op eq "Bcast")     { $val = $c; }                           # send 1
+            elsif ($op eq "Allgather") { $val = $c * ($ppn * $nodes); }         # send 1 and receive (N-1)
+            elsif ($op eq "Gather")    { $val = $c * ($ppn * $nodes - 1); }     # receive (N-1)
+            elsif ($op eq "Scatter")   { $val = $c * ($ppn * $nodes - 1); }     # send (N-1)
+            elsif ($op eq "Alltoall")  { $val = $c * ($ppn * $nodes - 1) * 2; } # send (N-1) and receive (N-1)
+            elsif ($op eq "Allreduce") { $val = 0; }
+            elsif ($op eq "Reduce")    { $val = 0; }
+            else                       { $val = 0; }
+
+            # print bw as a percentage of peak specified by user
+            if ($args{peakbw}) { $val = $val * 100.0 / $args{peakbw}; }
+          }
+          if ($args{mode} eq "html") { $color = set_color($val); }
+        }
+        my $content = sprintf("%0.3f", $val);
+        push @cells, cell($content, $color);
+      } # end $nodes
+    } # end $ppn
+    push @rows, row(@cells);
+  } # end $size
+  format_table(@rows);
+
+  if ($args{mode} eq "html") { print "</table>\n<br/>\n"; }
+} # end $op
+
+my @rules = (
+  "Barrier < Bcast",
+  "Bcast < Gather",
+  "Gather < Allgather",
+  "Allgather < Alltoall",
+
+  "Barrier < Allreduce",
+  "Reduce < Allreduce",
+  "Allreduce < Gather",
+
+  "Gather = Scatter",
+  "Scan = Allreduce",
+  "Scan = Exscan",
+
+  "Allreduce < Reduce + Bcast",
+  "Allgather < Gather + Bcast",
+);
+
+# compute average time value, given operation, size, ppn, and nodes
+sub get_val
+{
+  my $op    = shift @_;
+  my $size  = shift @_;
+  my $ppn   = shift @_;
+  my $nodes = shift @_;
+
+  if (defined $op and
+      defined $size and
+      defined $ppn and
+      defined $nodes)
+  {
+    if (defined $times{$op} and
+        defined $times{$op}{$size} and
+        defined $times{$op}{$size}{$ppn} and
+        defined $times{$op}{$size}{$ppn}{$nodes})
+    {
+      my $time = avg(@{$times{$op}{$size}{$ppn}{$nodes}});
+      return $time;
+    }
+  }
+
+  return undef;
+}
+
+foreach my $rule (@rules) {
+  print "----------------------------\n";
+  print "Checking: $rule\n";
+  print "----------------------------\n";
+
+  my $check = undef;
+  my $op1 = undef;
+  my $op2 = undef;
+  my $op3 = undef;
+  if ($rule =~ /^(\w+)\s*([<=])\s*(\w+)$/) {
+    # coll < coll
+    # coll ~ coll
+    $op1   = $1;
+    $check = $2;
+    $op2   = $3;
+  } elsif ($rule =~ /^(\w+)\s*([<=])\s*(\w+)\s*\+\s*(\w+)$/) {
+    # coll < coll + coll
+    # coll ~ coll + coll
+    $op1   = $1;
+    $check = $2;
+    $op2   = $3;
+    $op3   = $4;
+  } else {
+    print "Unrecognized rule: $rule\n";
+  }
+
+  if (defined $op3) {
+    foreach my $size (sort {$a <=> $b} keys %{$times{$op1}}) {
+      foreach my $ppn (sort {$a <=> $b} keys %{$times{$op1}{$size}}) {
+        foreach my $nodes (sort {$a <=> $b} keys %{$times{$op1}{$size}{$ppn}}) {
+          my $time1 = get_val($op1, $size, $ppn, $nodes);
+          my $time2 = get_val($op2, $size, $ppn, $nodes);
+          my $time3 = get_val($op3, $size, $ppn, $nodes);
+          if (defined $time1 and defined $time2 and defined $time3) {
+            my $time23 = $time2 + $time3;
+            if ($check eq "<" and $time1 >= $time23) {
+              print "$rule: size=$size ppn=$ppn nodes=$nodes $op1=$time1 $op2+$op3=$time23 $op2=$time2 $op3=$time3\n";
+            } elsif ($check eq "=" and (($time1 < 0.95 * $time2) or ($time1 > 1.05 * $time2))) {
+              print "$rule: size=$size ppn=$ppn nodes=$nodes $op1=$time1 $op2+$op3=$time23 $op2=$time2 $op3=$time3\n";
+            }
+          }
+        } # nodes
+      } # ppn
+    } # size
+  } # op3
+  elsif (defined $op1 and defined $op2) {
+    foreach my $size (sort {$a <=> $b} keys %{$times{$op1}}) {
+      foreach my $ppn (sort {$a <=> $b} keys %{$times{$op1}{$size}}) {
+        foreach my $nodes (sort {$a <=> $b} keys %{$times{$op1}{$size}{$ppn}}) {
+          my $time1 = get_val($op1, $size, $ppn, $nodes);
+          my $time2 = get_val($op2, $size, $ppn, $nodes);
+          if (defined $time1 and defined $time2) {
+            if ($check eq "<" and $time1 >= $time2) {
+              print "$rule: size=$size ppn=$ppn nodes=$nodes $op1=$time1 $op2=$time2\n";
+            } elsif ($check eq "=" and (($time1 < 0.95 * $time2) or ($time1 > 1.05 * $time2))) {
+              print "$rule: size=$size ppn=$ppn nodes=$nodes $op1=$time1 $op2=$time2\n";
+            }
+          }
+        } # nodes
+      } # ppn
+    } # size
+  } # op1 and op2 defined
+}
+
+my $rule = undef;
+
+# check that for all collectives, time(size=a) < time(size=b) if a < b
+$rule = "time(size=a) < time(size=b) if a < b";
+  print "----------------------------\n";
+  print "Checking: $rule\n";
+  print "----------------------------\n";
+
+  foreach my $op (sort {$a cmp $b} keys %times) {
+    foreach my $size1 (sort {$a <=> $b} keys %{$times{$op}}) {
+    foreach my $size2 (sort {$a <=> $b} keys %{$times{$op}}) {
+      foreach my $ppn (sort {$a <=> $b} keys %{$times{$op}{$size1}}) {
+        foreach my $nodes (sort {$a <=> $b} keys %{$times{$op}{$size1}{$ppn}}) {
+          if ($size1 < $size2) {
+            my $time1 = get_val($op, $size1, $ppn, $nodes);
+            my $time2 = get_val($op, $size2, $ppn, $nodes);
+            if (defined $time1 and defined $time2 and $time1 >= $time2) {
+              print "$rule: op=$op ppn=$ppn nodes=$nodes size=$size1=$time1 size=$size2=$time2\n";
+            }
+          }
+        } # nodes
+      } # ppn
+    } # size2
+    } # size1
+  } # op
+
+#my %all_nodes = ();
+#foreach my $op    (keys %times) {
+#foreach my $size  (keys %{$times{$op}}) {
+#foreach my $ppn   (keys %{$times{$op}{$size}}) {
+#foreach my $nodes (keys %{$times{$op}{$size}{$ppn}}) {
+#  $all_nodes{$nodes} = 1;
+#}
+#}
+#}
+#}
+
+# check that for all collectives, time(ppn=a) < time(ppn=b) if a < b
+$rule = "time(ppn=a) < time(ppn=b) if a < b";
+  print "----------------------------\n";
+  print "Checking: $rule\n";
+  print "----------------------------\n";
+
+  foreach my $op (sort {$a cmp $b} keys %times) {
+    foreach my $size (sort {$a <=> $b} keys %{$times{$op}}) {
+      foreach my $ppn1 (sort {$a <=> $b} keys %{$times{$op}{$size}}) {
+      foreach my $ppn2 (sort {$a <=> $b} keys %{$times{$op}{$size}}) {
+        foreach my $nodes (sort {$a <=> $b} keys %{$times{$op}{$size}{$ppn1}}) {
+          if ($ppn1 < $ppn2) {
+            my $time1 = get_val($op, $size, $ppn1, $nodes);
+            my $time2 = get_val($op, $size, $ppn2, $nodes);
+            if (defined $time1 and defined $time2 and $time1 >= $time2) {
+              print "$rule: op=$op nodes=$nodes size=$size ppn1=$ppn1=$time1 ppn2=$ppn2=$time2\n";
+            }
+          }
+        } # nodes
+      } # ppn2
+      } # ppn1
+    } # size
+  } # op
+
+
+# check that for all collectives, time(nodes=a) < time(nodes=b) if a < b
+$rule = "time(nodes=a) < time(nodes=b) if a < b";
+  print "----------------------------\n";
+  print "Checking: $rule\n";
+  print "----------------------------\n";
+
+  foreach my $op (sort {$a cmp $b} keys %times) {
+    foreach my $size (sort {$a <=> $b} keys %{$times{$op}}) {
+      foreach my $ppn (sort {$a <=> $b} keys %{$times{$op}{$size}}) {
+        foreach my $nodes1 (sort {$a <=> $b} keys %{$times{$op}{$size}{$ppn}}) {
+        foreach my $nodes2 (sort {$a <=> $b} keys %{$times{$op}{$size}{$ppn}}) {
+          if ($nodes1 < $nodes2) {
+            my $time1 = get_val($op, $size, $ppn, $nodes1);
+            my $time2 = get_val($op, $size, $ppn, $nodes2);
+            if (defined $time1 and defined $time2 and $time1 >= $time2) {
+              print "$rule: op=$op ppn=$ppn size=$size nodes1=$nodes1=$time1 nodes2=$nodes2=$time2\n";
+            }
+          }
+        } # nodes2
+        } # nodes1
+      } # ppn
+    } # size
+  } # op
+
+exit 0;
