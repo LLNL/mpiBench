@@ -431,7 +431,7 @@ int processArgs(int argc, char **argv, struct argList* args)
     /* turn on test flags requested by user
        if user doesn't specify any, all will be run */
     for(j=0; j<NUM_TESTS; j++) {
-      if(!strcmp(TEST_NAMES[j], argv[i])) {
+      if(!strcasecmp(TEST_NAMES[j], argv[i])) {
         if(args->testFlags == 0x1FFF) args->testFlags = 0;
         args->testFlags |= TEST_FLAGS[j];
       }
