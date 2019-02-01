@@ -292,7 +292,7 @@ double Print_Timings(double value, char* title, size_t bytes, int iters, MPI_Com
         /* determine who we are in this communicator */
         int nranks, flag;
         char* str;
-        MPI_Attr_get(comm, dimid_key, (void*) &str, &flag); 
+        MPI_Comm_get_attr(comm, dimid_key, (void*) &str, &flag); 
         MPI_Comm_size(comm, &nranks);
 
         printf("%-20.20s\t", title);
@@ -932,14 +932,14 @@ int main (int argc, char *argv[])
     int total_comms = 1+ndims+partitions;
     int current_comm = 0;
     int extra_state;
-    MPI_Keyval_create(MPI_NULL_COPY_FN, MPI_NULL_DELETE_FN, &dimid_key, (void*) &extra_state);
+    MPI_Comm_create_keyval(MPI_COMM_NULL_COPY_FN, MPI_COMM_NULL_DELETE_FN, &dimid_key, (void*) &extra_state);
     MPI_Comm* comms = (MPI_Comm*) _ALLOC_MAIN_(sizeof(MPI_Comm) * total_comms, "Communicator array");
     char* comm_desc = (char*)     _ALLOC_MAIN_(256              * total_comms, "Communicator description array");
 
     /* the first communicator is MPI_COMM_WORLD */
     comms[0]  = MPI_COMM_WORLD;
     strcpy(&comm_desc[256*current_comm], "MPI_COMM_WORLD");
-    MPI_Attr_put(comms[0], dimid_key, (void*) &comm_desc[256*current_comm]); 
+    MPI_Comm_set_attr(comms[0], dimid_key, (void*) &comm_desc[256*current_comm]); 
     current_comm++;
 
     /* if ndims is specified, map MPI_COMM_WORLD into ndims Cartesian space, and create 1-D communicators along each dimension */
@@ -977,7 +977,7 @@ int main (int argc, char *argv[])
             }
             MPI_Cart_sub(comm_dims, dims, &comms[current_comm]);
             sprintf(&comm_desc[256*current_comm], "CartDim-%dof%d", d+1, ndims);
-            MPI_Attr_put(comms[current_comm], dimid_key, (void*) &comm_desc[256*current_comm]); 
+            MPI_Comm_set_attr(comms[current_comm], dimid_key, (void*) &comm_desc[256*current_comm]); 
             current_comm++;
         }
 
@@ -992,7 +992,7 @@ int main (int argc, char *argv[])
         int partnum = (int) rank_local / currentsize;
         MPI_Comm_split(MPI_COMM_WORLD, partnum, rank_local, &comms[current_comm]);
         sprintf(&comm_desc[256*current_comm], "PartSize-%d", currentsize);
-        MPI_Attr_put(comms[current_comm], dimid_key, (void*) &comm_desc[256*current_comm]); 
+        MPI_Comm_set_attr(comms[current_comm], dimid_key, (void*) &comm_desc[256*current_comm]); 
         current_comm++;
         currentsize >>= 1;
         p++;
